@@ -3,9 +3,7 @@ import { Provider, useDispatch, useSelector } from 'react-redux';
 import { configureStore, createSlice } from '@reduxjs/toolkit';
 import { Send, Calendar, Clock, Search, Plus, Sparkles, User, FileText } from 'lucide-react';
 
-// ==========================================
 // 1. REDUX SETUP (Strict Assignment Requirement)
-// ==========================================
 
 const initialFormState = {
   hcpName: '',
@@ -45,9 +43,7 @@ const store = configureStore({
   }
 });
 
-// ==========================================
 // 2. MAIN APPLICATION COMPONENT
-// ==========================================
 
 function CRMApp() {
   // Use Redux Hooks instead of Context
