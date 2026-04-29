@@ -1,10 +1,19 @@
 import os
+import logging
 from typing import List, Optional, Dict, Any, Annotated
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from dotenv import load_dotenv
 from sqlalchemy import create_engine, Column, Integer, String, Text
 from sqlalchemy.orm import declarative_base, sessionmaker
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # LangGraph & Langchain imports
 from typing_extensions import TypedDict
@@ -12,7 +21,8 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import MemorySaver
 from langchain_groq import ChatGroq
-from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
+# CRITICAL FIX: SystemMessage is imported here
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
 
@@ -89,14 +99,26 @@ class State(TypedDict):
     messages: Annotated[list, add_messages]
     extracted_form_data: Dict[str, Any]
 
-llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0)
-llm_with_tools = llm.bind_tools(tools)
-
 def chatbot_node(state: State):
-    msg = llm_with_tools.invoke(state["messages"])
+    """Process messages through the LLM"""
+    if llm_with_tools is None:
+        return {"messages": [AIMessage(content="Agent not initialized")]}
+    
+    # 🚨 STRICT INSTRUCTIONS TO FORCE PROPER TOOL USAGE 🚨
+    sys_msg = SystemMessage(content="""You are an AI CRM Assistant for Life Sciences. 
+    You MUST use the provided tools to fulfill requests. 
+    Do NOT output raw XML or <function> tags in your text response. 
+    If a user asks for history, natively trigger the get_hcp_history tool. 
+    If they ask to schedule, natively trigger the schedule_followup tool. 
+    Always summarize the tool results naturally and concisely to the user.""")
+    
+    # Prepend the system message to the conversation history
+    messages = [sys_msg] + state["messages"]
+    msg = llm_with_tools.invoke(messages)
     return {"messages": [msg]}
 
 def tool_node(state: State):
+    """Execute tool calls from the LLM"""
     last_message = state["messages"][-1]
     extracted = state.get("extracted_form_data", {})
     responses = []
@@ -143,20 +165,40 @@ def tool_node(state: State):
     }
 
 def should_continue(state: State):
+    """Determine if we should continue to tool execution"""
     last_message = state["messages"][-1]
     if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
         return "tools"
     return END
 
-graph_builder = StateGraph(State)
-graph_builder.add_node("chatbot", chatbot_node)
-graph_builder.add_node("tools", tool_node)
-graph_builder.add_edge(START, "chatbot")
-graph_builder.add_conditional_edges("chatbot", should_continue, {"tools": "tools", END: END})
-graph_builder.add_edge("tools", "chatbot")
+llm = None
+llm_with_tools = None
+crm_agent = None
 
-memory = MemorySaver()
-crm_agent = graph_builder.compile(checkpointer=memory)
+def initialize_agent():
+    """Initialize LLM and agent on first use"""
+    global llm, llm_with_tools, crm_agent
+    
+    if crm_agent is not None:
+        return
+    
+    try:
+        llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0)
+        llm_with_tools = llm.bind_tools(tools)
+        
+        graph_builder = StateGraph(State)
+        graph_builder.add_node("chatbot", chatbot_node)
+        graph_builder.add_node("tools", tool_node)
+        graph_builder.add_edge(START, "chatbot")
+        graph_builder.add_conditional_edges("chatbot", should_continue, {"tools": "tools", END: END})
+        graph_builder.add_edge("tools", "chatbot")
+        
+        memory = MemorySaver()
+        crm_agent = graph_builder.compile(checkpointer=memory)
+        logger.info("Agent initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize agent: {str(e)}", exc_info=True)
+        raise
 
 # ==========================================
 # 4. FASTAPI ENDPOINTS
@@ -172,12 +214,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/api/health")
+async def health_check():
+    """Health check endpoint - verifies API is running"""
+    return {"status": "ok", "message": "API is running"}
+
 class ChatRequest(BaseModel):
     message: str
 
 @app.post("/api/chat")
 async def chat_with_agent(req: ChatRequest):
     try:
+        initialize_agent()
+        logger.info(f"Chat request received: {req.message[:50]}...")
         config: RunnableConfig = {"configurable": {"thread_id": "demo_session_1"}}
         
         initial_state: State = {
@@ -190,12 +239,13 @@ async def chat_with_agent(req: ChatRequest):
         final_message = result["messages"][-1].content
         extracted_data = result.get("extracted_form_data", {})
         
+        logger.info("Chat response generated successfully")
         return {
             "response": final_message,
             "extracted_data": extracted_data
         }
     except Exception as e:
-        print(e)
+        logger.error(f"Chat endpoint error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 class SaveInteractionRequest(BaseModel):
@@ -215,6 +265,7 @@ class SaveInteractionRequest(BaseModel):
 async def save_interaction(data: SaveInteractionRequest):
     db = SessionLocal()
     try:
+        logger.info(f"Saving interaction for HCP: {data.hcpName}")
         new_record = InteractionModel(
             hcp_name=data.hcpName,
             interaction_type=data.interactionType,
@@ -222,7 +273,7 @@ async def save_interaction(data: SaveInteractionRequest):
             time=data.time,
             attendees=data.attendees,
             topics_discussed=data.topics,
-            materials_shared=data.materials,
+            materials_shared=f"{data.materials} | Samples: {data.samples}",
             sentiment=data.sentiment,
             outcomes=data.outcomes,
             follow_up=data.followUp
@@ -230,8 +281,10 @@ async def save_interaction(data: SaveInteractionRequest):
         db.add(new_record)
         db.commit()
         db.refresh(new_record)
+        logger.info(f"Successfully saved interaction with ID: {new_record.id}")
         return {"status": "success", "id": new_record.id}
     except Exception as e:
+        logger.error(f"Save interaction error: {str(e)}", exc_info=True)
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
     finally:

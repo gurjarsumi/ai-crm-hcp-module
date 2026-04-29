@@ -1,5 +1,5 @@
+backend/.env
+frontend/node_modules/
 node_modules/
-venv/
+backend/crm_database.db
 __pycache__/
-.env
-crm_database.db
