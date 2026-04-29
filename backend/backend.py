@@ -26,9 +26,8 @@ from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, System
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
 
-# ==========================================
 # 1. DATABASE SETUP (SQLAlchemy)
-# ==========================================
+
 DATABASE_URL = "sqlite:///./crm_database.db" 
 
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -51,9 +50,7 @@ class InteractionModel(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# ==========================================
 # 2. LANGGRAPH TOOLS
-# ==========================================
 
 @tool
 def log_interaction(
@@ -91,9 +88,7 @@ def schedule_followup(date_time: str, task_description: str) -> str:
 
 tools = [log_interaction, edit_interaction, get_hcp_history, search_product_materials, schedule_followup]
 
-# ==========================================
 # 3. LANGGRAPH AGENT SETUP (With Memory)
-# ==========================================
 
 class State(TypedDict):
     messages: Annotated[list, add_messages]
@@ -104,7 +99,6 @@ def chatbot_node(state: State):
     if llm_with_tools is None:
         return {"messages": [AIMessage(content="Agent not initialized")]}
     
-    # 🚨 STRICT INSTRUCTIONS TO FORCE PROPER TOOL USAGE 🚨
     sys_msg = SystemMessage(content="""You are an AI CRM Assistant for Life Sciences. 
     You MUST use the provided tools to fulfill requests. 
     Do NOT output raw XML or <function> tags in your text response. 
@@ -151,7 +145,6 @@ def tool_node(state: State):
                 task_val = args.get("task_description", "")
                 extracted["followUp"] = f"{task_val} scheduled for {date_val}"
             
-            # --- EXECUTE TOOL ---
             tool_instance = next((t for t in tools if t.name == name), None)
             tool_result = "Success"
             if tool_instance:
@@ -200,10 +193,7 @@ def initialize_agent():
         logger.error(f"Failed to initialize agent: {str(e)}", exc_info=True)
         raise
 
-# ==========================================
 # 4. FASTAPI ENDPOINTS
-# ==========================================
-
 app = FastAPI(title="AI-First CRM API")
 
 app.add_middleware(
